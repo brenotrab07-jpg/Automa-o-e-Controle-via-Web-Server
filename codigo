@@ -1,0 +1,145 @@
+#include <WiFi.h>
+#include <WebServer.h> // <-- Biblioteca Nativa (sem dependências externas)
+
+// Definições de Pinos
+const int PIN_SERVO = 13; // Restrição: Sem PWM nativo neste projeto
+const int PIN_LED1 = 12;
+const int PIN_LED2 = 14;
+
+// Credenciais de Wi-Fi para o simulador Wokwi
+const char* ssid = "Wokwi-GUEST";
+const char* password = "";
+
+// Instância do Servidor Web nativo na porta 80
+WebServer server(80);
+
+// ====================================================================
+// SOLUÇÃO DE ENGENHARIA: PWM via Software (Timer/Interrupção)
+// Compatível com ESP32 Core 3.x
+// ====================================================================
+hw_timer_t * timer = NULL;
+volatile uint32_t counter = 0;
+volatile uint32_t pulseWidth = 1500; // Pulso inicial de 1.5ms (90 graus)
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Interrupção disparada a cada 10 microsegundos
+void IRAM_ATTR onTimer() {
+  portENTER_CRITICAL_ISR(&timerMux);
+  counter += 10;
+  
+  if (counter >= 20000) {
+    counter = 0;
+    digitalWrite(PIN_SERVO, HIGH);
+  } 
+  else if (counter >= pulseWidth) {
+    digitalWrite(PIN_SERVO, LOW);
+  }
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+// Função para converter graus (0-180) em largura de pulso (us)
+void setServoAngle(int angle) {
+  if(angle < 0) angle = 0;
+  if(angle > 180) angle = 180;
+  uint32_t newPulse = map(angle, 0, 180, 500, 2400);
+  
+  portENTER_CRITICAL(&timerMux);
+  pulseWidth = newPulse;
+  portEXIT_CRITICAL(&timerMux);
+}
+// ====================================================================
+
+// Interface HTML armazenada na memória flash (PROGMEM)
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Painel de Controle ESP32</title>
+  <style>
+    body { font-family: Arial; text-align: center; margin:0px auto; padding-top: 30px;}
+    .btn { background-color: #4CAF50; color: white; padding: 15px 32px; text-align: center; font-size: 16px; margin: 4px 2px; cursor: pointer; border: none; border-radius: 4px;}
+    .btn-off { background-color: #f44336; }
+    .slider { width: 80%; max-width: 400px; margin: 20px auto;}
+  </style>
+</head>
+<body>
+  <h2>Automação & Controle (Sem PWM Nativo)</h2>
+  
+  <h3>Relé 1 (LED Vermelho)</h3>
+  <button class="btn" onclick="fetch('/led?id=1&state=1')">LIGAR</button>
+  <button class="btn btn-off" onclick="fetch('/led?id=1&state=0')">DESLIGAR</button>
+  
+  <h3>Relé 2 (LED Azul)</h3>
+  <button class="btn" onclick="fetch('/led?id=2&state=1')">LIGAR</button>
+  <button class="btn btn-off" onclick="fetch('/led?id=2&state=0')">DESLIGAR</button>
+  
+  <h3>Controle do Servo (Pino 13)</h3>
+  <input type="range" min="0" max="180" value="90" class="slider" id="servoSlider" onchange="updateServo(this.value)">
+  <p>Ângulo: <span id="angleValue">90</span>&deg;</p>
+
+  <script>
+    function updateServo(val) {
+      document.getElementById('angleValue').innerText = val;
+      fetch('/servo?angle=' + val);
+    }
+  </script>
+</body>
+</html>
+)rawliteral";
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(PIN_SERVO, OUTPUT);
+  pinMode(PIN_LED1, OUTPUT);
+  pinMode(PIN_LED2, OUTPUT);
+  digitalWrite(PIN_LED1, LOW);
+  digitalWrite(PIN_LED2, LOW);
+
+  // Inicialização do Hardware Timer (Core 3.x)
+  timer = timerBegin(1000000); 
+  timerAttachInterrupt(timer, &onTimer); 
+  timerAlarm(timer, 10, true, 0); 
+
+  Serial.print("Conectando ao Wi-Fi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConectado!");
+  Serial.print("IP para acesso: ");
+  Serial.println(WiFi.localIP());
+
+  // Rotas do WebServer Nativo
+  server.on("/", HTTP_GET, []() {
+    server.send(200, "text/html", index_html);
+  });
+
+  server.on("/led", HTTP_GET, []() {
+    if (server.hasArg("id") && server.hasArg("state")) {
+      String id = server.arg("id");
+      String state = server.arg("state");
+      
+      int pin = (id == "1") ? PIN_LED1 : PIN_LED2;
+      digitalWrite(pin, state == "1" ? HIGH : LOW);
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/servo", HTTP_GET, []() {
+    if (server.hasArg("angle")) {
+      int angle = server.arg("angle").toInt();
+      setServoAngle(angle);
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.begin();
+}
+
+void loop() {
+  // A biblioteca nativa exige que o cliente seja "escutado" constantemente no loop
+  server.handleClient();
+  delay(2); // Pequeno atraso para manter a estabilidade da simulação e do Wi-Fi
+}
